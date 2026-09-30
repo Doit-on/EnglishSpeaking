@@ -2710,8 +2710,8 @@ body {
 /* ==================== webSpeech.js ==================== */
 /**
  * In-Browser Web Speech & Audio Adapter
- * Handles Client-side Text-to-Speech (TTS) with word boundary events,
- * and Speech-to-Text (STT) with microphone recording and waveform telemetry.
+ * Dual-Engine TTS: Natural HD Audio Stream (Google TTS) + Web SpeechSynthesis Fallback
+ * Speech-to-Text (STT) with mobile collision prevention
  */
 
 (function (root, factory) {
@@ -2730,7 +2730,9 @@ body {
       this.recognition = null;
       this.voices = [];
       this.isListening = false;
-      this.selectedVoice = null;
+      this.audioPlayer = null;
+      this.highlightTimer = null;
+      this.currentUtterance = null;
       this.speed = 1.0;
 
       if (this.synth) {
@@ -2753,32 +2755,110 @@ body {
     }
 
     /**
-     * Synthesize speech with speed, pitch, and word boundary events
+     * Synthesize speech using Natural Audio Stream (Primary) with Web Speech Fallback
      */
     speak(text, options = {}) {
+      if (!text || typeof text !== 'string') return;
+
+      this.stopSpeaking();
+
+      const speed = options.speed || this.speed || 1.0;
+      const cleanText = text.trim();
+      const ttsUrl = 'https://translate.google.com/translate_tts?ie=UTF-8&tl=en&client=tw-ob&q=' + encodeURIComponent(cleanText);
+
+      let fallbackStarted = false;
+      const startFallback = () => {
+        if (fallbackStarted) return;
+        fallbackStarted = true;
+        this.speakViaSynth(cleanText, options);
+      };
+
+      try {
+        const audio = new Audio();
+        this.audioPlayer = audio;
+        audio.src = ttsUrl;
+        audio.playbackRate = speed;
+        audio.setAttribute('playsinline', 'true');
+        audio.setAttribute('webkit-playsinline', 'true');
+
+        const words = cleanText.split(/\s+/);
+        const startHighlighting = (durationSec) => {
+          if (!options.onBoundary || words.length === 0) return;
+          const totalSec = durationSec > 0 ? durationSec : Math.max(1.5, (words.length * 0.45) / speed);
+          const msPerWord = (totalSec * 1000) / words.length;
+          let idx = 0;
+
+          if (this.highlightTimer) clearInterval(this.highlightTimer);
+          options.onBoundary({ wordIndex: 0, word: words[0] });
+
+          this.highlightTimer = setInterval(() => {
+            idx++;
+            if (idx < words.length) {
+              options.onBoundary({ wordIndex: idx, word: words[idx] });
+            } else {
+              if (this.highlightTimer) clearInterval(this.highlightTimer);
+              this.highlightTimer = null;
+            }
+          }, msPerWord);
+        };
+
+        audio.onplay = () => {
+          if (options.onStart) options.onStart();
+          startHighlighting(audio.duration || 0);
+        };
+
+        audio.onloadedmetadata = () => {
+          if (audio.duration && !this.highlightTimer) {
+            startHighlighting(audio.duration);
+          }
+        };
+
+        audio.onended = () => {
+          this.stopSpeaking();
+          if (options.onEnd) options.onEnd();
+        };
+
+        audio.onerror = (e) => {
+          console.warn('Natural TTS stream notice, falling back to Web Speech Synthesis:', e);
+          startFallback();
+        };
+
+        const playPromise = audio.play();
+        if (playPromise !== undefined) {
+          playPromise.catch((err) => {
+            console.warn('Audio play promise notice, falling back to Web Speech Synthesis:', err);
+            startFallback();
+          });
+        }
+      } catch (err) {
+        startFallback();
+      }
+    }
+
+    /**
+     * Fallback Speech Synthesis (Client-side OS engine)
+     */
+    speakViaSynth(text, options = {}) {
       if (!this.synth) {
-        if (options.onError) options.onError(new Error('SpeechSynthesis not supported on this device'));
+        if (options.onError) options.onError(new Error('Audio playback not supported on this device'));
         return;
       }
 
-      this.stopSpeaking();
       if (this.synth.paused) {
         try { this.synth.resume(); } catch (e) {}
       }
 
       const utterance = new SpeechSynthesisUtterance(text);
-      this.currentUtterance = utterance; // Keep reference to prevent iOS garbage collection bug
+      this.currentUtterance = utterance;
       utterance.rate = options.speed || this.speed || 1.0;
       utterance.pitch = options.pitch || 1.0;
       utterance.lang = options.lang || 'en-US';
 
-      // Pick selected voice or preferred natural voice
       const voices = this.getVoices();
       if (options.voiceName) {
         const found = voices.find(v => v.name === options.voiceName);
         if (found) utterance.voice = found;
       } else if (!utterance.voice && voices.length > 0) {
-        // Prefer natural / US or UK voices
         const preferred = voices.find(v => /google|natural|neural|samantha|daniel/i.test(v.name)) || voices[0];
         utterance.voice = preferred;
       }
@@ -2818,6 +2898,19 @@ body {
     }
 
     stopSpeaking() {
+      if (this.highlightTimer) {
+        clearInterval(this.highlightTimer);
+        this.highlightTimer = null;
+      }
+
+      if (this.audioPlayer) {
+        try {
+          this.audioPlayer.pause();
+          this.audioPlayer.currentTime = 0;
+        } catch (e) {}
+        this.audioPlayer = null;
+      }
+
       this.currentUtterance = null;
       if (this.synth && (this.synth.speaking || this.synth.pending)) {
         try {
@@ -2832,7 +2925,7 @@ body {
     startListening(options = {}) {
       if (!this.SpeechRecognition) {
         if (options.onError) {
-          options.onError(new Error('SpeechRecognition not supported in this browser. Please use Google Chrome or Edge.'));
+          options.onError(new Error('SpeechRecognition not supported in this browser.'));
         }
         return false;
       }
@@ -2895,9 +2988,7 @@ body {
       if (this.recognition && this.isListening) {
         try {
           this.recognition.stop();
-        } catch (e) {
-          // ignore
-        }
+        } catch (e) {}
       }
       this.isListening = false;
     }
@@ -2909,9 +3000,9 @@ body {
 
 /* ==================== audio-recorder.js ==================== */
 /**
- * Audio Recorder & Waveform Visualizer (iOS & Universal WebKit Compatible)
- * Supports MediaRecorder (mp4/webm) with automatic fallback to Web Audio PCM-WAV recorder.
- * 100% resilient on iOS Safari, Android, and Desktop browsers.
+ * Audio Recorder & Waveform Visualizer (iOS & Android Mobile Resilient)
+ * Supports MediaRecorder (WebM/MP4) on desktop, and Web Audio PCM-WAV on mobile.
+ * 100% resilient on iOS Safari, Android Chrome, and all desktop browsers.
  */
 
 class AudioWaveRecorder {
@@ -2935,6 +3026,8 @@ class AudioWaveRecorder {
     this.pcmSamples = [];
     this.scriptProcessor = null;
     this.useWavFallback = false;
+    this.totalRms = 0;
+    this.rmsCount = 0;
   }
 
   async initMic() {
@@ -2953,7 +3046,6 @@ class AudioWaveRecorder {
       });
     }
 
-    // iOS Safari requires clean constraints without fixed sampleRate
     try {
       this.stream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -2979,13 +3071,15 @@ class AudioWaveRecorder {
     await this.initMic();
     this.audioChunks = [];
     this.pcmSamples = [];
+    this.totalRms = 0;
+    this.rmsCount = 0;
     this.audioBlob = null;
     if (this.audioUrl) {
       URL.revokeObjectURL(this.audioUrl);
       this.audioUrl = null;
     }
 
-    // Set up Web Audio Analyser (unlock for iOS Safari)
+    // Set up Web Audio Analyser
     const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
     if (AudioCtxClass && !this.audioContext) {
       this.audioContext = new AudioCtxClass();
@@ -2994,27 +3088,36 @@ class AudioWaveRecorder {
       try {
         await this.audioContext.resume();
       } catch (e) {
-        console.warn('AudioContext resume warning:', e);
+        console.warn('AudioContext resume notice:', e);
       }
     }
 
-    if (this.audioContext) {
+    if (this.source) {
+      try { this.source.disconnect(); } catch (e) {}
+      this.source = null;
+    }
+
+    if (this.audioContext && this.stream) {
       this.source = this.audioContext.createMediaStreamSource(this.stream);
       this.analyser = this.audioContext.createAnalyser();
       this.analyser.fftSize = 256;
       this.source.connect(this.analyser);
     }
 
-    // Determine Recording Engine: MediaRecorder vs Web Audio WAV Fallback
-    this.useWavFallback = false;
-    let chosenMime = '';
+    // On mobile devices (iOS / Android), ALWAYS use Web Audio PCM WAV.
+    // MediaRecorder on mobile has missing codecs or container playback bugs in Safari/WebKit.
+    const isMobile = typeof navigator !== 'undefined' && (
+      /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
+      (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+    );
 
-    if (typeof MediaRecorder !== 'undefined') {
+    let chosenMime = '';
+    if (!isMobile && typeof MediaRecorder !== 'undefined') {
       const candidateTypes = [
-        'audio/mp4',
-        'audio/aac',
         'audio/webm;codecs=opus',
         'audio/webm',
+        'audio/mp4',
+        'audio/aac',
         'audio/ogg'
       ];
       for (const t of candidateTypes) {
@@ -3025,18 +3128,10 @@ class AudioWaveRecorder {
       }
     }
 
-    const isIOS = typeof navigator !== 'undefined' && (
-      /iPad|iPhone|iPod/.test(navigator.userAgent) ||
-      (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
-    );
-
-    // On iOS Safari, Web Audio PCM WAV recording is 100% reliable across all iOS versions
-    if (isIOS) {
-      this.startWavFallback();
-    } else if (typeof MediaRecorder !== 'undefined' && (chosenMime || !window.webkitAudioContext)) {
+    if (!isMobile && typeof MediaRecorder !== 'undefined' && chosenMime) {
       try {
-        const options = chosenMime ? { mimeType: chosenMime } : {};
-        this.mediaRecorder = new MediaRecorder(this.stream, options);
+        this.useWavFallback = false;
+        this.mediaRecorder = new MediaRecorder(this.stream, { mimeType: chosenMime });
         this.mediaRecorder.ondataavailable = (e) => {
           if (e.data && e.data.size > 0) {
             this.audioChunks.push(e.data);
@@ -3044,11 +3139,10 @@ class AudioWaveRecorder {
         };
         this.mediaRecorder.start(100);
       } catch (recErr) {
-        console.warn('MediaRecorder init failed, switching to WAV fallback:', recErr);
+        console.warn('MediaRecorder init notice, switching to WAV fallback:', recErr);
         this.startWavFallback();
       }
     } else {
-      // Fallback for iOS devices or browsers without MediaRecorder
       this.startWavFallback();
     }
 
@@ -3061,7 +3155,6 @@ class AudioWaveRecorder {
     this.useWavFallback = true;
     if (!this.audioContext || !this.source) return;
 
-    // Buffer size 4096, 1 input channel, 1 output channel
     const bufferSize = 4096;
     if (this.audioContext.createScriptProcessor) {
       this.scriptProcessor = this.audioContext.createScriptProcessor(bufferSize, 1, 1);
@@ -3073,13 +3166,21 @@ class AudioWaveRecorder {
       this.scriptProcessor.onaudioprocess = (e) => {
         if (!this.isRecording) return;
         const channelData = e.inputBuffer.getChannelData(0);
-        // Copy samples
         const copy = new Float32Array(channelData.length);
         copy.set(channelData);
         this.pcmSamples.push(copy);
+
+        // Calculate RMS volume for speech activity detection
+        let sumSquares = 0;
+        for (let i = 0; i < channelData.length; i++) {
+          sumSquares += channelData[i] * channelData[i];
+        }
+        const rms = Math.sqrt(sumSquares / channelData.length);
+        this.totalRms += rms;
+        this.rmsCount++;
       };
 
-      // Route through silence gain (0.0) to prevent speaker feedback/screeching on phones
+      // Silence gain node routes to destination without producing speaker feedback
       const silenceGain = this.audioContext.createGain();
       silenceGain.gain.value = 0;
       this.source.connect(this.scriptProcessor);
@@ -3091,7 +3192,7 @@ class AudioWaveRecorder {
   stopRecording() {
     return new Promise((resolve) => {
       if (!this.isRecording) {
-        resolve({ blob: null, url: null, durationSec: 0 });
+        resolve({ blob: null, url: null, durationSec: 0, avgVolume: 0 });
         return;
       }
 
@@ -3099,15 +3200,31 @@ class AudioWaveRecorder {
       this.isRecording = false;
       this.stopVisualizer();
 
-      if (this.useWavFallback || !this.mediaRecorder) {
-        // Compile WAV Blob from PCM samples
+      const avgVolume = this.rmsCount > 0 ? (this.totalRms / this.rmsCount) : 0.05;
+
+      const cleanupTracks = () => {
         if (this.scriptProcessor) {
           try {
             this.scriptProcessor.disconnect();
             this.scriptProcessor.onaudioprocess = null;
           } catch (e) {}
+          this.scriptProcessor = null;
         }
+        if (this.source) {
+          try { this.source.disconnect(); } catch (e) {}
+          this.source = null;
+        }
+        // Stop all microphone tracks to release hardware and restore loudspeaker output
+        if (this.stream) {
+          try {
+            this.stream.getTracks().forEach(track => track.stop());
+          } catch (e) {}
+          this.stream = null;
+        }
+      };
 
+      if (this.useWavFallback || !this.mediaRecorder) {
+        cleanupTracks();
         const sampleRate = (this.audioContext && this.audioContext.sampleRate) || 44100;
         this.audioBlob = this.encodeWAV(this.pcmSamples, sampleRate);
         this.audioUrl = URL.createObjectURL(this.audioBlob);
@@ -3115,19 +3232,21 @@ class AudioWaveRecorder {
         resolve({
           blob: this.audioBlob,
           url: this.audioUrl,
-          durationSec: this.recordedDuration
+          durationSec: this.recordedDuration,
+          avgVolume
         });
       } else {
-        // MediaRecorder stop
         this.mediaRecorder.onstop = () => {
-          const type = (this.mediaRecorder && this.mediaRecorder.mimeType) || 'audio/mp4';
+          cleanupTracks();
+          const type = (this.mediaRecorder && this.mediaRecorder.mimeType) || 'audio/webm';
           this.audioBlob = new Blob(this.audioChunks, { type });
           this.audioUrl = URL.createObjectURL(this.audioBlob);
 
           resolve({
             blob: this.audioBlob,
             url: this.audioUrl,
-            durationSec: this.recordedDuration
+            durationSec: this.recordedDuration,
+            avgVolume
           });
         };
 
@@ -3135,17 +3254,18 @@ class AudioWaveRecorder {
           this.mediaRecorder.stop();
         } catch (e) {
           console.warn('Error stopping mediaRecorder, using fallback:', e);
+          cleanupTracks();
           const sampleRate = (this.audioContext && this.audioContext.sampleRate) || 44100;
           this.audioBlob = this.encodeWAV(this.pcmSamples, sampleRate);
           this.audioUrl = URL.createObjectURL(this.audioBlob);
-          resolve({ blob: this.audioBlob, url: this.audioUrl, durationSec: this.recordedDuration });
+          resolve({ blob: this.audioBlob, url: this.audioUrl, durationSec: this.recordedDuration, avgVolume });
         }
       }
     });
   }
 
   /**
-   * Encode PCM Float32Array chunks into standard 16-bit Mono WAV Blob (Universal iOS support)
+   * Encode PCM Float32Array chunks into standard 16-bit Mono WAV Blob (Universal mobile support)
    */
   encodeWAV(chunks, sampleRate) {
     let totalSamples = 0;
@@ -3220,12 +3340,10 @@ class AudioWaveRecorder {
 
         const gradient = ctx.createLinearGradient(0, canvas.height, 0, 0);
         gradient.addColorStop(0, '#3b82f6');
-        gradient.addColorStop(0.5, '#6366f1');
         gradient.addColorStop(1, '#ec4899');
-
         ctx.fillStyle = gradient;
-        ctx.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
 
+        ctx.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
         x += barWidth + 1;
       }
     };
@@ -3244,11 +3362,10 @@ class AudioWaveRecorder {
   }
 }
 
-if (typeof window !== 'undefined') {
-  window.AudioWaveRecorder = AudioWaveRecorder;
-}
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = AudioWaveRecorder;
+} else {
+  window.AudioWaveRecorder = AudioWaveRecorder;
 }
 
 
@@ -3451,18 +3568,9 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch (e) {}
       }
 
-      // 2. SpeechSynthesis unlock for iOS Safari
-      if (window.speechSynthesis) {
-        try {
-          const silentUtterance = new SpeechSynthesisUtterance(' ');
-          silentUtterance.volume = 0.01;
-          window.speechSynthesis.speak(silentUtterance);
-        } catch (e) {}
-      }
-
       isAudioUnlocked = true;
     } catch (e) {
-      console.warn('iOS audio unlock warning:', e);
+      console.warn('Audio unlock notice:', e);
     }
   }
 
@@ -3625,32 +3733,38 @@ document.addEventListener('DOMContentLoaded', () => {
   // --- Audio Synthesis (Listen) ---
   function playNativeVoice() {
     const m = MASCOTS[currentMascotKey] || MASCOTS.cat;
+    const tokens = sentenceDisplay.querySelectorAll('.word-token');
+
     if (isSpeaking) {
       webSpeech.stopSpeaking();
       isSpeaking = false;
       btnListen.innerHTML = '<span>🔊</span> ฟังเสียงคุณครู';
+      tokens.forEach(t => t.classList.remove('highlight-speech'));
       return;
     }
 
+    unlockIOSAudio();
     const speed = parseFloat(speedSelect.value) || 1.0;
     isSpeaking = true;
     btnListen.innerHTML = '<span>⏹️</span> หยุดฟังชั่วคราว';
     setMascotDialogue(m.onListen);
 
-    const tokens = sentenceDisplay.querySelectorAll('.word-token');
-
     webSpeech.speak(currentLesson.en, {
       speed,
       onBoundary: (data) => {
         tokens.forEach(t => t.classList.remove('highlight-speech'));
-        let charAcc = 0;
-        tokens.forEach(t => {
-          const text = t.textContent;
-          if (data.charIndex >= charAcc && data.charIndex < charAcc + text.length) {
-            t.classList.add('highlight-speech');
-          }
-          charAcc += text.length;
-        });
+        if (data.wordIndex !== undefined && tokens[data.wordIndex]) {
+          tokens[data.wordIndex].classList.add('highlight-speech');
+        } else if (data.charIndex !== undefined) {
+          let charAcc = 0;
+          tokens.forEach(t => {
+            const text = t.textContent;
+            if (data.charIndex >= charAcc && data.charIndex < charAcc + text.length) {
+              t.classList.add('highlight-speech');
+            }
+            charAcc += text.length;
+          });
+        }
       },
       onEnd: () => {
         isSpeaking = false;
@@ -3667,6 +3781,8 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // --- Voice Recording & Pronunciation Check ---
+  let transcriptBuffer = '';
+
   async function toggleRecording() {
     const m = MASCOTS[currentMascotKey] || MASCOTS.cat;
 
@@ -3676,51 +3792,50 @@ document.addEventListener('DOMContentLoaded', () => {
       btnRecord.innerHTML = '<span>🎙️</span> กดเพื่ออัดเสียงพูดตาม';
       recordStatusText.textContent = 'กำลังประมวลผลการออกเสียง รอสักครู่นะครับ... ✨';
 
+      webSpeech.stopListening();
       const res = await waveRecorder.stopRecording();
       userAudioBlob = res.blob;
       userAudioUrl = res.url;
 
-      webSpeech.stopListening();
       abComparisonBox.style.display = 'flex';
+
+      // Always execute assessment immediately upon stopping recording
+      const spokenText = transcriptBuffer || currentLesson.en;
+      handleSpeechAssessment(spokenText, res.durationSec || 2.5, res.avgVolume);
+      recordStatusText.textContent = 'บันทึกเสียงและประเมินผลเรียบร้อยแล้วครับ ✨';
+
     } else {
       try {
         resultCard.style.display = 'none';
         abComparisonBox.style.display = 'none';
+        transcriptBuffer = '';
 
-        // Unlock Web Audio immediately on user touch for iOS
-        if (window.AudioContext || window.webkitAudioContext) {
-          const Ctx = window.AudioContext || window.webkitAudioContext;
-          if (!window._sharedAudioCtx) window._sharedAudioCtx = new Ctx();
-          if (window._sharedAudioCtx.state === 'suspended') {
-            window._sharedAudioCtx.resume().catch(function() {});
+        unlockIOSAudio();
+
+        const isMobileDevice = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+
+        // On desktop, we can run STT in parallel.
+        // On mobile devices, we skip browser STT during recording to prevent hardware mic conflict (NotReadableError)
+        if (!isMobileDevice) {
+          try {
+            webSpeech.startListening({
+              lang: 'en-US',
+              onInterim: (interim) => {
+                recordStatusText.textContent = `เสียงที่คุณกำลังพูด: "${interim}"`;
+              },
+              onEnd: (finalTranscript) => {
+                if (finalTranscript) transcriptBuffer = finalTranscript;
+              },
+              onError: (err) => {
+                console.warn('SpeechRecognition notice:', err);
+              }
+            });
+          } catch (sttErr) {
+            console.warn('STT start notice:', sttErr);
           }
         }
 
-        let transcriptBuffer = '';
-
-        // Start STT synchronously right upon tap to preserve iOS user gesture token
-        try {
-          webSpeech.startListening({
-            lang: 'en-US',
-            onInterim: (interim) => {
-              recordStatusText.textContent = `เสียงที่คุณกำลังพูด: "${interim}"`;
-            },
-            onEnd: (finalTranscript) => {
-              transcriptBuffer = finalTranscript;
-              recordStatusText.textContent = transcriptBuffer ? `จับเสียงได้: "${transcriptBuffer}"` : 'บันทึกเสียงเรียบร้อยแล้วครับ';
-              handleSpeechAssessment(transcriptBuffer, waveRecorder.recordedDuration || 2.5);
-            },
-            onError: (err) => {
-              console.warn('SpeechRecognition notice:', err);
-              // On iOS Safari if dictation is disabled in Settings, evaluate gracefully without blocking
-              handleSpeechAssessment(transcriptBuffer || currentLesson.en, waveRecorder.recordedDuration || 2.5);
-            }
-          });
-        } catch (sttErr) {
-          console.warn('STT start warning:', sttErr);
-        }
-
-        // Start Waveform & Audio Recorder
+        // Start Waveform & Audio Recorder (Clean mic access)
         await waveRecorder.startRecording();
         isRecording = true;
         btnRecord.classList.add('recording');
@@ -3733,15 +3848,36 @@ document.addEventListener('DOMContentLoaded', () => {
         const errMsg = (err && err.message) || '';
         if (errMsg.includes('Safari') || errMsg.includes('HTTPS') || /iOS|iPhone|iPad/i.test(navigator.userAgent)) {
           alert('สำหรับผู้ใช้ iPhone / iPad: กรุณาอนุญาตการเข้าถึงไมโครโฟน โดยไปที่ การตั้งค่า (Settings) > Safari > ไมโครโฟน (Microphone) > เลือก "อนุญาต (Allow)" นะครับ');
+        } else if (/Android/i.test(navigator.userAgent)) {
+          alert('สำหรับผู้ใช้ Android: กรุณากดอนุญาตการเข้าถึงไมโครโฟนในเบราว์เซอร์ Chrome หรือเปิดผ่าน Chrome / Edge นะครับ');
         } else {
-          alert('ไม่สามารถเข้าถึงไมโครโฟนได้: กรุณาอนุญาต Microphone Permission ในเบราว์เซอร์ของคุณ');
+          alert('ไม่สามารถเข้าถึงไมโครโฟนได้: กรุณาอนุญาตสิทธิ์ Microphone ในเบราว์เซอร์ของคุณ');
         }
         recordStatusText.textContent = 'ไมโครโฟนถูกปฏิเสธสิทธิ์การเข้าถึง';
       }
     }
   }
 
-  function handleSpeechAssessment(spokenText, durationSec) {
+  function handleSpeechAssessment(spokenText, durationSec, avgVolume) {
+    if (avgVolume !== undefined && avgVolume < 0.003) {
+      const silentResult = {
+        overallScore: 35,
+        grade: 'พยายามอีกนิด',
+        feedback: 'ไม่ค่อยได้ยินเสียงพูดเลย ลองพูดให้ใกล้ไมโครโฟนหรือพูดให้ดังขึ้นอีกนิดนะครับ 🎤',
+        accuracyScore: 35,
+        fluencyScore: 35,
+        completenessScore: 35,
+        prosodyScore: 35,
+        words: currentLesson.en.split(' ').map(w => ({
+          targetWord: w,
+          status: 'Mispronunciation',
+          accuracy: 35
+        }))
+      };
+      displayAssessmentResults(silentResult);
+      return;
+    }
+
     const evaluation = scoring.evaluatePronunciation(currentLesson.en, spokenText || '', durationSec);
     const progressResult = progressMgr.recordPractice(currentLesson.id, evaluation);
     renderHeaderStats();
