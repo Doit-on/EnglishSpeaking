@@ -64,6 +64,11 @@
   padding: 0;
 }
 
+button {
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
 body {
   font-family: var(--font-friendly);
   background: #f1f5f9;
@@ -1224,7 +1229,7 @@ body {
         พื้นที่ฝึกทักษะการฟังและอ่านออกเสียงภาษาอังกฤษให้ถูกต้อง ชัดเจน และเป็นธรรมชาติ 
         พร้อมระบบตรวจจับสำเนียงและคำแนะนำรูปปากที่เข้าใจง่าย สไตล์แก๊งเพื่อนสัตว์สุดน่ารัก!
       </p>
-      <button class="hero-cta-btn" id="btnEnterApp">
+      <button class="hero-cta-btn" id="btnEnterApp" onclick="if(window.showApp)window.showApp();">
         <span>🚀 เริ่มต้นฝึกฝนทันที</span>
         <span style="font-size:1.4rem;">👉</span>
       </button>
@@ -1313,7 +1318,7 @@ body {
     <!-- Top App Navigation & Live Stats -->
     <header class="app-header">
       <div class="header-container">
-        <div class="brand" id="brandBtnHome" title="คลิกเพื่อกลับหน้าแรก">
+        <div class="brand" id="brandBtnHome" title="คลิกเพื่อกลับหน้าแรก" onclick="if(window.showLanding)window.showLanding();" style="cursor:pointer;">
           <div class="brand-mascot" id="brandMascot">🐱</div>
           <div class="brand-text">
             <h1>Smart English Lab 🐾</h1>
@@ -1336,7 +1341,7 @@ body {
         <div class="header-stats">
           <div class="stat-chip" id="statStreak">🔥 1 วัน</div>
           <div class="stat-chip" id="statXP">⭐ 0 แต้ม</div>
-          <button class="btn btn-secondary" id="btnBackHome" style="padding:0.4rem 0.85rem; font-size:0.85rem;">
+          <button class="btn btn-secondary" id="btnBackHome" onclick="if(window.showLanding)window.showLanding();" style="padding:0.4rem 0.85rem; font-size:0.85rem;">
             🏠 หน้าแรก
           </button>
         </div>
@@ -2199,9 +2204,30 @@ body {
     };
   }
 
+  const memoryFallback = {};
+  const safeStorage = {
+    getItem(key) {
+      try {
+        if (typeof window !== 'undefined' && 'localStorage' in window && window.localStorage) {
+          return window.localStorage.getItem(key);
+        }
+      } catch (e) {}
+      return memoryFallback[key] || null;
+    },
+    setItem(key, val) {
+      try {
+        if (typeof window !== 'undefined' && 'localStorage' in window && window.localStorage) {
+          window.localStorage.setItem(key, val);
+          return;
+        }
+      } catch (e) {}
+      memoryFallback[key] = String(val);
+    }
+  };
+
   class ProgressManager {
     constructor(customStorage = null) {
-      this.storage = customStorage || (typeof localStorage !== 'undefined' ? localStorage : null);
+      this.storage = customStorage || safeStorage;
       this.state = this.loadState();
     }
 
@@ -3008,7 +3034,14 @@ body {
 class AudioWaveRecorder {
   constructor(canvasElement = null) {
     this.canvas = canvasElement;
-    this.canvasCtx = canvasElement ? canvasElement.getContext('2d') : null;
+    this.canvasCtx = null;
+    try {
+      if (canvasElement && typeof canvasElement.getContext === 'function') {
+        this.canvasCtx = canvasElement.getContext('2d');
+      }
+    } catch (e) {
+      console.warn('Canvas 2D context notice:', e);
+    }
     this.mediaRecorder = null;
     this.audioChunks = [];
     this.audioBlob = null;
@@ -3376,13 +3409,33 @@ if (typeof module !== 'undefined' && module.exports) {
  * Microphone Recorder, Pronunciation Assessment, and Sentence Scramble.
  */
 
-document.addEventListener('DOMContentLoaded', () => {
-  // Modules
+  // Safe Storage Helper (prevents iOS SecurityError on file://, Private Browsing, or strict Safari)
+  const appMemoryStore = {};
+  function safeGetItem(key, defaultVal) {
+    try {
+      if (typeof window !== 'undefined' && 'localStorage' in window && window.localStorage) {
+        const val = window.localStorage.getItem(key);
+        return val !== null ? val : defaultVal;
+      }
+    } catch (e) {}
+    return appMemoryStore[key] !== undefined ? appMemoryStore[key] : defaultVal;
+  }
+  function safeSetItem(key, val) {
+    try {
+      if (typeof window !== 'undefined' && 'localStorage' in window && window.localStorage) {
+        window.localStorage.setItem(key, val);
+        return;
+      }
+    } catch (e) {}
+    appMemoryStore[key] = String(val);
+  }
+
+  // Modules with safe fallback
   const curriculum = window.EngCurriculum;
   const phonetics = window.EngPhonetics;
   const scoring = window.EngScoring;
   const scramble = window.EngScramble;
-  const { ProgressManager } = window.EngProgress;
+  const ProgressManager = (window.EngProgress && window.EngProgress.ProgressManager) ? window.EngProgress.ProgressManager : class { constructor() { this.state = {}; } getStats() { return { streak: 1, totalXP: 0 }; } recordPractice() { return {}; } getMistakeBankList() { return []; } };
 
   const progressMgr = new ProgressManager();
   const webSpeech = new window.WebSpeechAdapter();
@@ -3459,7 +3512,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let currentCategory = curriculum.CATEGORIES[0].id;
   let currentLesson = curriculum.LESSONS[0];
   let activeTab = 'shadowing';
-  let currentMascotKey = localStorage.getItem('eng_speech_mascot') || 'cat';
+  let currentMascotKey = safeGetItem('eng_speech_mascot', 'cat');
   let userAudioBlob = null;
   let userAudioUrl = null;
   let currentUserAudioElem = null;
@@ -3537,12 +3590,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Initialize
   function init() {
-    updateMascotUI(currentMascotKey);
-    renderHeaderStats();
-    renderCategories();
-    renderLessons();
-    loadLesson(currentLesson);
-    setupEventListeners();
+    try { updateMascotUI(currentMascotKey); } catch (e) { console.warn('Mascot UI init:', e); }
+    try { renderHeaderStats(); } catch (e) { console.warn('Stats init:', e); }
+    try { renderCategories(); } catch (e) { console.warn('Categories init:', e); }
+    try { renderLessons(); } catch (e) { console.warn('Lessons init:', e); }
+    try { loadLesson(currentLesson); } catch (e) { console.warn('Lesson load init:', e); }
+    try { setupEventListeners(); } catch (e) { console.warn('Events init:', e); }
   }
 
   let isAudioUnlocked = false;
@@ -3607,27 +3660,30 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // View Navigation: Landing <-> App
   function showLanding() {
-    landingView.style.display = 'flex';
-    appView.style.display = 'none';
+    if (landingView) landingView.style.display = 'flex';
+    if (appView) appView.style.display = 'none';
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
   function showApp() {
     unlockIOSAudio();
-    landingView.style.display = 'none';
-    appView.style.display = 'flex';
+    if (landingView) landingView.style.display = 'none';
+    if (appView) appView.style.display = 'flex';
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
+  window.showApp = showApp;
+  window.showLanding = showLanding;
+
   function updateMascotUI(key) {
     currentMascotKey = key;
-    localStorage.setItem('eng_speech_mascot', key);
+    safeSetItem('eng_speech_mascot', key);
     const m = MASCOTS[key] || MASCOTS.cat;
 
-    brandMascot.textContent = m.emoji;
-    coachAvatar.textContent = m.emoji;
-    coachName.textContent = `${m.name} ชวนฝึก:`;
-    coachDialogue.textContent = `"${m.intro}"`;
+    if (brandMascot) brandMascot.textContent = m.emoji;
+    if (coachAvatar) coachAvatar.textContent = m.emoji;
+    if (coachName) coachName.textContent = `${m.name} ชวนฝึก:`;
+    if (coachDialogue) coachDialogue.textContent = `"${m.intro}"`;
 
     // Highlight active avatar button in Header
     document.querySelectorAll('.avatar-opt').forEach(btn => {
@@ -4065,20 +4121,45 @@ document.addEventListener('DOMContentLoaded', () => {
   // --- Event Listeners ---
   function setupEventListeners() {
     // Navigation Events
-    btnEnterApp.addEventListener('click', showApp);
-    btnBackHome.addEventListener('click', showLanding);
-    brandBtnHome.addEventListener('click', showLanding);
+    if (btnEnterApp) {
+      btnEnterApp.addEventListener('click', showApp);
+      btnEnterApp.addEventListener('touchend', (e) => {
+        e.preventDefault();
+        showApp();
+      }, { passive: false });
+    }
+
+    if (btnBackHome) {
+      btnBackHome.addEventListener('click', showLanding);
+      btnBackHome.addEventListener('touchend', (e) => {
+        e.preventDefault();
+        showLanding();
+      }, { passive: false });
+    }
+
+    if (brandBtnHome) {
+      brandBtnHome.addEventListener('click', showLanding);
+      brandBtnHome.addEventListener('touchend', (e) => {
+        e.preventDefault();
+        showLanding();
+      }, { passive: false });
+    }
 
     // Landing Page Mascot Selection
     landingMascotCards.forEach(card => {
-      card.addEventListener('click', () => {
+      const selectCard = () => {
         const animal = card.dataset.animal;
         updateMascotUI(animal);
-      });
+      };
+      card.addEventListener('click', selectCard);
+      card.addEventListener('touchend', (e) => {
+        e.preventDefault();
+        selectCard();
+      }, { passive: false });
     });
 
-    btnListen.addEventListener('click', playNativeVoice);
-    btnRecord.addEventListener('click', toggleRecording);
+    if (btnListen) btnListen.addEventListener('click', playNativeVoice);
+    if (btnRecord) btnRecord.addEventListener('click', toggleRecording);
 
     // Avatar Selector Events (Header)
     document.querySelectorAll('.avatar-opt').forEach(btn => {
@@ -4093,43 +4174,51 @@ document.addEventListener('DOMContentLoaded', () => {
     document.addEventListener('click', unlockIOSAudio, { once: true });
 
     // A/B Comparison Buttons
-    btnPlayNative.addEventListener('click', () => {
-      unlockIOSAudio();
-      webSpeech.speak(currentLesson.en, { speed: parseFloat(speedSelect.value) || 1.0 });
-    });
+    if (btnPlayNative) {
+      btnPlayNative.addEventListener('click', () => {
+        unlockIOSAudio();
+        webSpeech.speak(currentLesson.en, { speed: parseFloat(speedSelect.value) || 1.0 });
+      });
+    }
 
-    btnPlayUser.addEventListener('click', () => {
-      unlockIOSAudio();
-      if (userAudioUrl) {
-        if (currentUserAudioElem) {
-          currentUserAudioElem.pause();
+    if (btnPlayUser) {
+      btnPlayUser.addEventListener('click', () => {
+        unlockIOSAudio();
+        if (userAudioUrl) {
+          if (currentUserAudioElem) {
+            currentUserAudioElem.pause();
+          }
+          currentUserAudioElem = new Audio();
+          currentUserAudioElem.src = userAudioUrl;
+          currentUserAudioElem.setAttribute('playsinline', 'true');
+          currentUserAudioElem.setAttribute('webkit-playsinline', 'true');
+          const playPromise = currentUserAudioElem.play();
+          if (playPromise !== undefined) {
+            playPromise.catch(err => {
+              console.warn('HTMLAudioElement play failed, trying Web Audio fallback:', err);
+              if (userAudioBlob) {
+                playBlobViaWebAudio(userAudioBlob);
+              }
+            });
+          }
         }
-        currentUserAudioElem = new Audio();
-        currentUserAudioElem.src = userAudioUrl;
-        currentUserAudioElem.setAttribute('playsinline', 'true');
-        currentUserAudioElem.setAttribute('webkit-playsinline', 'true');
-        const playPromise = currentUserAudioElem.play();
-        if (playPromise !== undefined) {
-          playPromise.catch(err => {
-            console.warn('HTMLAudioElement play failed, trying Web Audio fallback:', err);
-            if (userAudioBlob) {
-              playBlobViaWebAudio(userAudioBlob);
-            }
-          });
-        }
-      }
-    });
+      });
+    }
 
     // Scramble Buttons
-    btnResetScramble.addEventListener('click', () => {
-      placedTokens = [];
-      renderScrambleTiles();
-    });
+    if (btnResetScramble) {
+      btnResetScramble.addEventListener('click', () => {
+        placedTokens = [];
+        renderScrambleTiles();
+      });
+    }
 
-    btnSpeakScrambled.addEventListener('click', () => {
-      switchTab('shadowing');
-      playNativeVoice();
-    });
+    if (btnSpeakScrambled) {
+      btnSpeakScrambled.addEventListener('click', () => {
+        switchTab('shadowing');
+        playNativeVoice();
+      });
+    }
 
     // Tab Switching
     document.querySelectorAll('.tab-btn').forEach(btn => {
@@ -4146,18 +4235,29 @@ document.addEventListener('DOMContentLoaded', () => {
       b.classList.toggle('active', b.dataset.tab === tab);
     });
 
-    shadowingTabContent.style.display = tab === 'shadowing' ? 'block' : 'none';
-    scrambleTabContent.style.display = tab === 'scramble' ? 'block' : 'none';
-    mistakesTabContent.style.display = tab === 'mistakes' ? 'block' : 'none';
+    if (shadowingTabContent) shadowingTabContent.style.display = tab === 'shadowing' ? 'block' : 'none';
+    if (scrambleTabContent) scrambleTabContent.style.display = tab === 'scramble' ? 'block' : 'none';
+    if (mistakesTabContent) mistakesTabContent.style.display = tab === 'mistakes' ? 'block' : 'none';
 
     if (tab === 'mistakes') {
       renderMistakes();
     }
   }
 
-  // Start app
-  init();
-});
+  // Safe Bootstrapping (guarantees execution on iOS Safari even if DOMContentLoaded already fired)
+  function bootApp() {
+    try {
+      init();
+    } catch (err) {
+      console.error('App boot error:', err);
+    }
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', bootApp);
+  } else {
+    bootApp();
+  }
 
 
   </script>
